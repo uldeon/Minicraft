@@ -1,0 +1,412 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Mini Minecraft 2D Monochrome — E-Ink</title>
+<style type="text/css">
+  /* E-ink friendly styles: high contrast, large controls, no gradients */
+  html,body { height:100%; margin:0; padding:0; background:#fff; color:#000; font-family: Arial, Helvetica, sans-serif; -webkit-touch-callout:none; -webkit-user-select:none; }
+  #wrap { position:relative; width:100%; height:100%; overflow:hidden; }
+  #gameCanvas { display:block; margin:0 auto; background:#fff; border:1px solid #000; }
+  #topbar { position:absolute; left:8px; top:6px; background:#fff; color:#000; padding:6px; border:1px solid #000; font-size:14px; }
+  #hotbar { position:absolute; left:50%; margin-left:-180px; bottom:8px; background:#fff; padding:6px; border:1px solid #000; }
+  .slot { display:inline-block; width:36px; height:36px; border:1px solid #000; margin-right:6px; text-align:center; line-height:36px; font-size:12px; background:#eee; color:#000; }
+  .slot.sel { background:#000; color:#fff; }
+  #controls { position:absolute; right:8px; bottom:8px; width:220px; background:#fff; border:1px solid #000; padding:6px; }
+  .btn { display:block; width:100%; height:44px; margin-bottom:6px; font-size:18px; background:#fff; color:#000; border:1px solid #000; }
+  .dirRow { margin-bottom:6px; }
+  .btnSmall { width:68px; height:44px; font-size:16px; display:inline-block; margin-right:6px; background:#fff; color:#000; border:1px solid #000; vertical-align:middle; }
+  #msg { position:absolute; left:50%; top:8px; margin-left:-160px; width:320px; background:#fff; color:#000; border:1px solid #000; padding:6px; text-align:center; font-size:14px; display:none; }
+  /* reduce ink flicker by avoiding complex CSS */
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="gameCanvas" width="800" height="480"></canvas>
+
+  <div id="topbar">HP: <span id="hp">10</span> &nbsp;|&nbsp; Inv: <span id="invSummary">vide</span></div>
+  <div id="msg"></div>
+
+  <div id="hotbar"></div>
+
+  <div id="controls">
+    <div style="text-align:center; font-weight:bold; margin-bottom:6px;">Contrôles tactiles</div>
+
+    <div class="dirRow">
+      <button class="btnSmall" id="btnUp">↑</button>
+    </div>
+    <div class="dirRow">
+      <button class="btnSmall" id="btnLeft">←</button>
+      <button class="btnSmall" id="btnDown">↓</button>
+      <button class="btnSmall" id="btnRight">→</button>
+    </div>
+
+    <button class="btn" id="btnBreak">⛏ Miner / Attaquer</button>
+    <button class="btn" id="btnPlace">⬜ Placer</button>
+    <button class="btn" id="btnAutoSave">💾 Sauvegarde Auto: ON</button>
+  </div>
+</div>
+
+<script type="text/javascript">
+/* Minimal, HTML4-style JS - compatible and e-ink tuned */
+
+/* ===== CONFIG ===== */
+var TILE = 28;            /* pixel tile size on canvas */
+var MAP_W = 48;          /* tiles */
+var MAP_H = 32;
+var TICK_MS = 500;       /* world tick (500 ms -> 2 updates/sec). Set higher for slow e-ink */
+var AUTOSAVE_MS = 5000;  /* autosave interval */
+var MAX_HP = 10;
+
+/* ===== SIMPLE WORLD + BLOCKS ===== */
+var BLOCK = {
+  AIR: 0, STONE:1, DIRT:2, WOOD:3, SAND:4, IRON:5, COAL:6
+};
+var COLOR = {};
+COLOR[BLOCK.AIR]   = "#ffffff";
+COLOR[BLOCK.STONE] = "#000000"; /* dark on e-ink */
+COLOR[BLOCK.DIRT]  = "#444444";
+COLOR[BLOCK.WOOD]  = "#222222";
+COLOR[BLOCK.SAND]  = "#888888";
+COLOR[BLOCK.IRON]  = "#111111";
+COLOR[BLOCK.COAL]  = "#000000";
+
+/* ===== STATE ===== */
+var canvas = document.getElementById('gameCanvas');
+var ctx = canvas.getContext('2d');
+
+var world = {
+  grid: new Array(MAP_W * MAP_H),
+  drops: [],  /* {x:float,y:float,id:int} */
+  mobs: []    /* {x,y,type,hp} */
+};
+
+var player = {
+  x:0, y:0,
+  hp: MAX_HP,
+  inv: {},  /* id -> count */
+  selectedBlock: null
+};
+
+var autosaveEnabled = true;
+var lastDrawChecksum = null; /* to avoid unnecessary redraws */
+
+/* ===== UTIL ===== */
+function idx(x,y){ return y*MAP_W + x; }
+function inBounds(x,y){ return x>=0 && y>=0 && x<MAP_W && y<MAP_H; }
+
+/* ===== WORLD GENERATION ===== */
+function genWorld(){
+  for(var y=0;y<MAP_H;y++){
+    for(var x=0;x<MAP_W;x++){
+      if(y< Math.floor(MAP_H/2) ) world.grid[idx(x,y)] = BLOCK.AIR;
+      else if(y < Math.floor(MAP_H/2)+2) world.grid[idx(x,y)] = BLOCK.DIRT;
+      else if(y < Math.floor(MAP_H/2)+6) world.grid[idx(x,y)] = BLOCK.STONE;
+      else world.grid[idx(x,y)] = BLOCK.STONE;
+    }
+  }
+  /* ores */
+  for(var i=0;i<28;i++){
+    var x = Math.floor(Math.random()*(MAP_W-4))+2;
+    var y = Math.floor(Math.random()*(MAP_H/2))+Math.floor(MAP_H/2)+2;
+    world.grid[idx(x,y)] = (Math.random() < 0.5) ? BLOCK.IRON : BLOCK.COAL;
+  }
+  /* spawn a few mobs on surface */
+  world.mobs = [];
+  for(var m=0;m<6;m++){
+    var mx = Math.floor(4 + Math.random()*(MAP_W-8));
+    var my = Math.floor(MAP_H/2 - 2);
+    world.mobs.push({ x: mx + 0.3, y: my + 0.3, type: (Math.random()<0.6 ? 'zombie' : 'creeper'), hp: 6 });
+  }
+}
+
+/* ===== SPAWN PLAYER SAFELY (on top of ground) ===== */
+function spawnPlayer(){
+  var cx = Math.floor(MAP_W/2);
+  for(var y=0;y<MAP_H-2;y++){
+    if(world.grid[idx(cx,y)] === BLOCK.AIR && world.grid[idx(cx,y+1)] !== BLOCK.AIR){
+      player.x = cx + 0.5;
+      player.y = y + 0.0; /* stand on top of air tile */
+      return;
+    }
+  }
+  /* fallback */
+  player.x = cx + 0.5;
+  player.y = Math.floor(MAP_H/2) - 1;
+}
+
+/* ===== SAVING / LOADING ===== */
+function saveGame(){
+  try {
+    var state = { grid: world.grid, drops: world.drops, mobs: world.mobs, player: { x: player.x, y: player.y, hp: player.hp, inv: player.inv, sel: player.selectedBlock } };
+    localStorage.setItem('mc2d_save', JSON.stringify(state));
+    showMsg('Sauvegardé', 1000);
+  } catch(e) { showMsg('Erreur sauvegarde', 2000); }
+}
+
+function loadGame(){
+  var raw = localStorage.getItem('mc2d_save');
+  if(!raw) return false;
+  try {
+    var s = JSON.parse(raw);
+    if(s.grid && s.grid.length === MAP_W*MAP_H) world.grid = s.grid.slice(0);
+    if(s.drops) world.drops = s.drops.slice(0);
+    if(s.mobs) world.mobs = s.mobs.slice(0);
+    if(s.player){ player.x = s.player.x; player.y = s.player.y; player.hp = s.player.hp || MAX_HP; player.inv = s.player.inv || {}; player.selectedBlock = s.player.sel || null; }
+    return true;
+  } catch(e){ return false; }
+}
+
+/* ===== DROPS & PICKUP ===== */
+function spawnDrop(x,y,id){
+  world.drops.push({ x: x + 0.4 + (Math.random()-0.5)*0.2, y: y + 0.4, id: id });
+}
+
+function pickupDrops(){
+  for(var i=world.drops.length-1;i>=0;i--){
+    var d = world.drops[i];
+    if(Math.abs(d.x - player.x) < 0.6 && Math.abs(d.y - player.y) < 0.6){
+      player.inv[d.id] = (player.inv[d.id]||0)+1;
+      world.drops.splice(i,1);
+      showMsg('Ramassé', 800);
+    }
+  }
+}
+
+/* ===== MINING / PLACING / ATTACK ===== */
+function mineAhead(){
+  /* mine the tile in front of player (simple: to right of player) */
+  var tx = Math.floor(player.x + 1);
+  var ty = Math.floor(player.y);
+  if(!inBounds(tx,ty)) return;
+  var id = world.grid[idx(tx,ty)];
+  if(id === BLOCK.AIR) {
+    showMsg('Rien à miner', 900);
+    return;
+  }
+  /* drop and set air */
+  world.grid[idx(tx,ty)] = BLOCK.AIR;
+  spawnDrop(tx,ty,id);
+  showMsg('Bloc cassé', 900);
+  dirtyRender();
+}
+
+function placeHere(){
+  if(player.selectedBlock === null) { showMsg('Rien en main', 900); return; }
+  var tx = Math.floor(player.x + 1);
+  var ty = Math.floor(player.y);
+  if(!inBounds(tx,ty)) return;
+  if(world.grid[idx(tx,ty)] !== BLOCK.AIR){ showMsg('Place occupée',900); return; }
+  if((player.inv[player.selectedBlock]||0) <= 0){ showMsg('Pas de blocs',900); return; }
+  /* place */
+  world.grid[idx(tx,ty)] = player.selectedBlock;
+  player.inv[player.selectedBlock] -= 1;
+  showMsg('Bloc placé',900);
+  dirtyRender();
+}
+
+function attackAhead(){
+  /* check mobs in front */
+  var tx = player.x + 1;
+  var ty = player.y;
+  for(var i=world.mobs.length-1;i>=0;i--){
+    var m = world.mobs[i];
+    if(Math.abs(m.x - tx) < 0.8 && Math.abs(m.y - ty) < 0.8){
+      m.hp -= 3;
+      if(m.hp <= 0){
+        /* drop item */
+        spawnDrop(Math.floor(m.x), Math.floor(m.y), BLOCK.COAL); /* crude drop */
+        world.mobs.splice(i,1);
+        showMsg('Mob tué',1200);
+      } else {
+        showMsg('Mob touché',800);
+      }
+      dirtyRender();
+      return;
+    }
+  }
+  showMsg('Aucun mob',900);
+}
+
+/* ===== MOB AI (very simple) ===== */
+function mobsTick(){
+  for(var i=0;i<world.mobs.length;i++){
+    var m = world.mobs[i];
+    var dx = player.x - m.x, dy = player.y - m.y;
+    var d = Math.sqrt(dx*dx + dy*dy);
+    if(d < 8){
+      /* move toward */
+      m.x += (dx/d) * 0.08;
+      m.y += (dy/d) * 0.08;
+      /* hurt player if close */
+      if(Math.abs(m.x - player.x) < 0.6 && Math.abs(m.y - player.y) < 0.6){
+        player.hp = Math.max(0, player.hp - 1);
+        dirtyRender();
+      }
+    } else {
+      /* roam slowly */
+      m.x += (Math.random()-0.5)*0.02;
+      m.y += (Math.random()-0.5)*0.02;
+    }
+    /* clamp to map */
+    if(m.x < 1) m.x = 1;
+    if(m.y < 1) m.y = 1;
+    if(m.x > MAP_W-2) m.x = MAP_W-2;
+    if(m.y > MAP_H-2) m.y = MAP_H-2;
+  }
+}
+
+/* ===== RENDERING (monochrome, minimal refresh) ===== */
+function drawWorld(){
+  var w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,w,h);
+
+  /* center on player */
+  var tilesX = Math.floor(w / TILE);
+  var tilesY = Math.floor(h / TILE);
+  var offsetX = Math.floor(player.x - tilesX/2);
+  var offsetY = Math.floor(player.y - tilesY/2);
+
+  /* clamp viewport */
+  if(offsetX < 0) offsetX = 0;
+  if(offsetY < 0) offsetY = 0;
+  if(offsetX > MAP_W - tilesX) offsetX = MAP_W - tilesX;
+  if(offsetY > MAP_H - tilesY) offsetY = MAP_H - tilesY;
+
+  /* draw tiles */
+  for(var yy=0; yy<tilesY; yy++){
+    for(var xx=0; xx<tilesX; xx++){
+      var gx = xx + offsetX;
+      var gy = yy + offsetY;
+      if(gx<0 || gy<0 || gx>=MAP_W || gy>=MAP_H) continue;
+      var id = world.grid[idx(gx,gy)];
+      if(id !== BLOCK.AIR){
+        ctx.fillStyle = COLOR[id] || '#000';
+        ctx.fillRect(xx*TILE, yy*TILE, TILE, TILE);
+      } else {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(xx*TILE, yy*TILE, TILE, TILE);
+      }
+    }
+  }
+
+  /* drops */
+  for(var i=0;i<world.drops.length;i++){
+    var d = world.drops[i];
+    var sx = Math.floor((d.x - offsetX) * TILE);
+    var sy = Math.floor((d.y - offsetY) * TILE);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(sx+Math.floor(TILE/4), sy+Math.floor(TILE/4), Math.max(2, Math.floor(TILE/4)), Math.max(2, Math.floor(TILE/4)));
+  }
+
+  /* mobs */
+  for(var i=0;i<world.mobs.length;i++){
+    var m = world.mobs[i];
+    var sx = Math.floor((m.x - offsetX) * TILE);
+    var sy = Math.floor((m.y - offsetY) * TILE);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(sx + TILE/6, sy + TILE/6, TILE - TILE/3, TILE - TILE/3);
+  }
+
+  /* player marker in center */
+  var centerX = Math.floor((player.x - offsetX) * TILE);
+  var centerY = Math.floor((player.y - offsetY) * TILE);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(centerX + Math.floor(TILE/4), centerY + Math.floor(TILE/4), Math.max(4, Math.floor(TILE/2)), Math.max(4, Math.floor(TILE/2)));
+
+  /* HUD: update topbar text */
+  var invSummary = [];
+  for(var k in player.inv){ if(player.inv.hasOwnProperty(k) && player.inv[k]>0) invSummary.push(k+':'+player.inv[k]); }
+  document.getElementById('hp').innerHTML = player.hp;
+  document.getElementById('invSummary').innerHTML = invSummary.length ? invSummary.join(' ') : 'vide';
+
+  lastDrawChecksum = Date.now(); /* not a real checksum but OK for change detection */
+}
+
+/* Only redraw when flagged dirty */
+var needDraw = true;
+function dirtyRender(){ needDraw = true; }
+
+/* ===== INPUT BUTTONS (touch/click) ===== */
+function initControls(){
+  document.getElementById('btnUp').onclick = function(){ movePlayer(0,-1); };
+  document.getElementById('btnDown').onclick = function(){ movePlayer(0,1); };
+  document.getElementById('btnLeft').onclick = function(){ movePlayer(-1,0); };
+  document.getElementById('btnRight').onclick = function(){ movePlayer(1,0); };
+
+  document.getElementById('btnBreak').onclick = function(){ mineAhead(); };
+  document.getElementById('btnPlace').onclick = function(){ placeHere(); };
+  document.getElementById('btnAutoSave').onclick = function(){
+    autosaveEnabled = !autosaveEnabled;
+    this.innerHTML = autosaveEnabled ? '💾 Sauvegarde Auto: ON' : '💾 Sauvegarde Auto: OFF';
+    showMsg(autosaveEnabled ? 'Autosave ON' : 'Autosave OFF',1200);
+  };
+}
+
+/* Simple movement: step by 1 tile and redraw */
+function movePlayer(dx,dy){
+  var nx = player.x + dx;
+  var ny = player.y + dy;
+  if(inBounds(Math.floor(nx), Math.floor(ny)) && world.grid[idx(Math.floor(nx),Math.floor(ny))] === BLOCK.AIR){
+    player.x = nx; player.y = ny;
+    pickupDrops();
+    dirtyRender();
+  } else {
+    /* try to place player on surface if stuck */
+    if(world.grid[idx(Math.floor(player.x), Math.floor(player.y))] !== BLOCK.AIR){
+      spawnPlayer(); dirtyRender();
+    } else {
+      showMsg('Obstacle',700);
+    }
+  }
+}
+
+/* ===== UI MESSAGES (brief) ===== */
+var msgTimer = null;
+function showMsg(txt, ms){
+  var m = document.getElementById('msg');
+  m.style.display = 'block';
+  m.innerHTML = txt;
+  if(msgTimer) clearTimeout(msgTimer);
+  msgTimer = setTimeout(function(){ m.style.display = 'none'; msgTimer = null; }, ms || 1000);
+}
+
+/* ===== GAME TICKS ===== */
+function gameTick(){
+  /* mobs AI */
+  mobsTick();
+  /* pickup nearby drops automatically */
+  pickupDrops();
+  /* autosave */
+  if(autosaveEnabled){
+    saveGame();
+  }
+  /* only redraw if something changed (we set needDraw manually when needed) */
+  if(needDraw){
+    drawWorld();
+    needDraw = false;
+  }
+}
+
+/* ===== BOOT ===== */
+function boot(){
+  if(!loadGame()){
+    genWorld();
+    spawnPlayer();
+  }
+  initControls();
+  /* initial draw */
+  needDraw = true;
+  drawWorld();
+  /* tick loop (slow for e-ink) */
+  setInterval(gameTick, TICK_MS);
+  /* autosave loop (safety) */
+  setInterval(function(){ if(autosaveEnabled) saveGame(); }, AUTOSAVE_MS);
+}
+
+/* ===== START ===== */
+boot();
+
+</script>
+</body>
+</html>
